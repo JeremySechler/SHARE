@@ -298,11 +298,31 @@ ELASTICSEARCH = {
     'TIMEOUT': int(os.environ.get('ELASTICSEARCH_TIMEOUT', '45')),
     'ACTIVE_INDEXES': split(os.environ.get('ELASTICSEARCH_ACTIVE_INDEXES', ''), ','),
     'INDEX_VERSIONS': split(os.environ.get('ELASTICSEARCH_INDEX_VERSIONS', ''), ','),
+    'DEFAULT_FETCHERS': {
+        'creativework': 'default',
+        'agent': 'default',
+        'subject': 'default',
+        'tag': 'default',
+    },
 }
 
+# TODO json blob from env
 ELASTICSEARCH['QUEUES'] = {
-    'elasticsearch-trickle': ELASTICSEARCH['ACTIVE_INDEXES'],
-    'elasticsearch-firehose': split(os.environ.get('ELASTICSEARCH_FIREHOSE_INDEXES', ''), ',')
+    'elasticsearch-trickle': [
+        {
+            'indexes': ELASTICSEARCH['ACTIVE_INDEXES'],
+            'fetcher_overrides': {},
+        },
+        {
+            'indexes': 
+            'fetcher_overrides': {
+                'creativework': 'short_subjects'
+            }
+        },
+    ],
+    'elasticsearch-firehose': {
+        'indexes': split(os.environ.get('ELASTICSEARCH_FIREHOSE_INDEXES', ''), ','),
+    },
 }
 
 ELASTICSEARCH_URL = ELASTICSEARCH['URL']

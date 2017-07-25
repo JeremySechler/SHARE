@@ -1,6 +1,8 @@
 import uuid
 import bleach
 
+from stevedore.extension import ExtensionManager
+
 from django.apps import apps
 from django.conf import settings
 from django.db import connection
@@ -14,15 +16,18 @@ from share.util import IDObfuscator
 
 class Fetcher:
 
-    MODEL = None
     QUERY = None
 
     @classmethod
-    def fetcher_for(cls, model):
-        for fetcher in cls.__subclasses__():
-            if issubclass(model, fetcher.MODEL):
-                return fetcher()
-        raise ValueError('No fetcher exists for {!r}'.format(model))
+    def fetcher_for(cls, model, fetcher_overrides={}):
+        model_name = model._meta.model_name.lower())
+        namespace = 'share.fetchers.{}'.format(model_name)
+        fetcher_name = {**settings.ELASTICSEARCH['DEFAULT_FETCHERS'], **fetcher_overrides}[model_name]
+        try:
+            fetcher_extension = ExtensionManager(namespace)[fetcher_name]
+        except KeyError:
+            raise SystemExit('No fetcher exists for {!r}'.format(model))
+        return fetcher_extension.plugin()
 
     def __call__(self, pks):
         if self.QUERY is None:
@@ -73,7 +78,6 @@ fetcher_for = Fetcher.fetcher_for
 class CreativeWorkFetcher(Fetcher):
     SUBJECT_DELIMITER = '|'
 
-    MODEL = models.AbstractCreativeWork
     QUERY = '''
         SELECT json_build_object(
             'id', creativework.id
@@ -287,9 +291,22 @@ class CreativeWorkFetcher(Fetcher):
         return super().post_process(data)
 
 
+class CreativeWorkShortSubjectsFetcher(CreativeWorkFetcher):
+    def post_process(self, data):
+        subjects = set()
+        for subject in data['subjects']:
+            taxonomy, *lineage = subject.split(self.SUBJECT_DELIMITER)
+            if taxonomy == settings.SUBJECTS_CENTRAL_TAXONOMY:
+                subjects.update(lineage)
+        data['subjects'] = list(subjects)
+
+        del data['subject_synonyms']
+
+        return super().post_process(data)
+
+
 class AgentFetcher(Fetcher):
 
-    MODEL = models.AbstractAgent
     QUERY = '''
         SELECT json_strip_nulls(json_build_object(
                                     'id', agent.id
@@ -341,8 +358,6 @@ class AgentFetcher(Fetcher):
 
 class SubjectFetcher(Fetcher):
 
-    MODEL = models.Subject
-
     def __call__(self, pks):
         for tag in models.Subject.objects.filter(id__in=pks):
             if not tag.name:
@@ -351,8 +366,6 @@ class SubjectFetcher(Fetcher):
 
 
 class TagFetcher(Fetcher):
-
-    MODEL = models.Tag
 
     def __call__(self, pks):
         for tag in models.Tag.objects.filter(id__in=pks):

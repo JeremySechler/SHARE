@@ -46,12 +46,19 @@ class IndexableMessage:
         return self._model
 
     @property
-    def indexes(self):
-        return [settings.ELASTICSEARCH_INDEX]
+    def all_done(self):
+        return not self.to_index
 
     def __init__(self, message):
         self.message = message
         self.protocol_version = message.payload.get('version', 0)
+        self.to_index = set()
+
+    def wait_for(self, id, index):
+        self.to_index.add((id, index))
+
+    def succeeded(self, id, index):
+        self.to_index.remove((id, index))
 
     def malformed(self, reason):
         raise ValueError('Malformed version {} payload, {}: {!r}'.format(
@@ -60,11 +67,13 @@ class IndexableMessage:
             self.message.payload,
         ))
 
-    def __iter__(self):
+    def iter_ids(self):
         raise NotImplementedError
 
-    def __next__(self):
-        raise NotImplementedError
+    def __iter__(self):
+        for id in self.iter_ids():
+            for index in self.indexes:
+                yield (id, self)
 
     def _to_model(self, name):
         name = name.lower()
@@ -105,11 +114,11 @@ class V0Message(IndexableMessage):
         self.ids = ids
         self._model = self._to_model(model)
 
+    def iter_ids(self):
+        return iter(self.ids)
+
     def __len__(self):
         return len(self.ids)
-
-    def __iter__(self):
-        return iter(self.ids)
 
 
 class V1Message(IndexableMessage):
@@ -131,7 +140,7 @@ class V1Message(IndexableMessage):
     def indexes(self):
         return self.message.payload.get('indexes', [settings.ELASTICSEARCH['ACTIVE_INDEXES']])
 
-    def __iter__(self):
+    def iter_ids(self):
         return iter(self.message.payload['ids'])
 
     def __len__(self):
@@ -145,24 +154,32 @@ class MessageFlattener:
         self.pending = collections.deque()
         self.requeued = []
 
+        self._pending_map = {}
+
         self.current = None
         self.messages = collections.deque(messages)
         self.buffer = collections.deque()
 
-    def ack_pending(self):
-        if not self.pending:
-            return
+    def wait_for(self, id, index, message):
+        self._pending_map.setdefault((id, index), set()).add(message)
+        message.wait_for(id, index)
 
-        logger.debug('ACKing %d messages', len(self.pending))
-        while self.pending:
-            message = self.pending.popleft()
-            message.message.ack()
-            self.acked.append(message)
+    def succeeded(self, id, index):
+        messages = self._pending_map.pop((id, index), None)
+        if messages is None:
+            return  # TODO?
+        for message in messages:
+            message.succeeded(id, index)
+            if message.all_done:
+                message.message.ack()
+                self.pending.remove(message)
+                self.acked.append(message)
 
     def requeue_pending(self):
         if not self.pending:
             return
 
+        self._pending_map = {}
         while self.pending:
             message = self.pending.popleft()
             message.message.requeue()
@@ -173,6 +190,7 @@ class MessageFlattener:
             return
 
         self.current = None
+        self._pending_map = {}
         while self.pending:
             message = self.pending.popleft()
             self.messages.append(message)
@@ -189,7 +207,7 @@ class MessageFlattener:
         self._load_buffer()
 
         try:
-            return (self.current.indexes, self.buffer.popleft())
+            return self.buffer.popleft()
         except IndexError:
             raise StopIteration
 
@@ -292,32 +310,33 @@ class ESIndexer:
             for ok, resp in streamer:
                 if not ok and not (resp.get('delete') and resp['delete']['status'] == 404):
                     raise ValueError(resp)
-
-                # ACK messages ASAP to avoid an infinite loop of re-indexing the same
-                # documents over and over
-                # By the time we actually get here, we know that ES has ingested this/these docs
-                # so it's safe to ACK them
-                flattener.ack_pending()
-
-            # One final check, if nothing get indexed for one reason or another
-            # then ack_pending may not have been called
-            # but we still have to ACK all the messages
-            flattener.ack_pending()
+                if resp.get('index'):
+                    data = resp['index']['data']
+                elif resp.get('delete'):
+                    data = resp['delete']['data']
+                else:
+                    raise ValueError('What are you doing')
+                flattener.succeeded(util.IDObfuscator.decode_id(data['_id']), data['_index'])
 
     def bulk_stream(self, model, flattener, gentle=False):
-        fetcher = fetcher_for(model)
         _type = model._meta.verbose_name_plural.replace(' ', '')
 
         for chunk in util.chunked(flattener, size=self.CHUNK_SIZE):
-            logger.debug('Indexing a chunk of size %d', len(chunk))
-            for blob in fetcher(chunk):
-                is_deleted = blob.pop('is_deleted')
-                for index in self.es_indexes:
-                    if is_deleted:
+            # TODO get queue_options or whatever it should be called
+            for index, fetcher_overrides in self.queue_options:
+                for id, message in chunk:
+                    for index in self.es_indexes:
+                        flattener.wait_for(message, id, index)
+
+                logger.debug('Indexing a chunk of size %d', len(chunk))
+
+                fetcher = fetcher_for(model, fetcher_overrides)
+                for blob in fetcher(chunk):
+                    if blob.pop('is_deleted'):
                         yield {'_id': blob['id'], '_op_type': 'delete', '_type': _type, '_index': index}
                     else:
                         yield {'_id': blob['id'], '_op_type': 'index', '_type': _type, '_index': index, **blob}
 
-            if gentle:
-                logger.debug('Gentle mode enabled, sleeping for %d seconds', self.GENTLE_SLEEP_TIME)
-                time.sleep(self.GENTLE_SLEEP_TIME)
+                if gentle:
+                    logger.debug('Gentle mode enabled, sleeping for %d seconds', self.GENTLE_SLEEP_TIME)
+                    time.sleep(self.GENTLE_SLEEP_TIME)

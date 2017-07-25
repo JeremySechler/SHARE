@@ -20,6 +20,19 @@ setup(
         'console_scripts': [
             'sharectl = share.bin.__main__:main',
         ],
+        'share.fetchers.creativework': [
+            'default = share.search.fetchers.CreativeWorkFetcher',
+            'short_subjects = share.search.fetchers.CreativeWorkShortSubjectsFetcher',
+        ],
+        'share.fetchers.agent': [
+            'default = share.search.fetchers.AgentFetcher',
+        ],
+        'share.fetchers.subject': [
+            'default = share.search.fetchers.SubjectFetcher',
+        ],
+        'share.fetchers.tag': [
+            'default = share.search.fetchers.TagFetcher',
+        ],
         'share.transformers': [
             'ca.lwbin = share.transformers.ca_lwbin:LWBINTransformer',
             'com.biomedcentral = share.transformers.com_biomedcentral:BioMedCentralTransformer',
