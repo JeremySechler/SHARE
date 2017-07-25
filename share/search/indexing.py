@@ -5,6 +5,7 @@ import logging
 from elasticsearch import helpers
 
 from django.apps import apps
+from django.conf import settings
 
 from share import util
 from share.models.base import ShareObject
@@ -43,6 +44,10 @@ class IndexableMessage:
         if not hasattr(self, '_model'):
             raise NotImplementedError
         return self._model
+
+    @property
+    def indexes(self):
+        return [settings.ELASTICSEARCH_INDEX]
 
     def __init__(self, message):
         self.message = message
@@ -112,7 +117,8 @@ class V1Message(IndexableMessage):
     {
         "version": 1,
         "model": "<model_name>",
-        "ids": [id1, id2, id3...]
+        "ids": [id1, id2, id3...],
+        "indexes": [share_v1, share_v2...],
     }
     """
     PROTOCOL_VERSION = 1
@@ -120,6 +126,10 @@ class V1Message(IndexableMessage):
     @property
     def model(self):
         return self._to_model(self.message.payload['model'])
+
+    @property
+    def indexes(self):
+        return self.message.payload.get('indexes', [settings.ELASTICSEARCH['ACTIVE_INDEXES']])
 
     def __iter__(self):
         return iter(self.message.payload['ids'])
@@ -179,7 +189,7 @@ class MessageFlattener:
         self._load_buffer()
 
         try:
-            return self.buffer.popleft()
+            return (self.current.indexes, self.buffer.popleft())
         except IndexError:
             raise StopIteration
 
@@ -207,10 +217,10 @@ class ESIndexer:
     MAX_CHUNK_BYTES = 32 * 10124 ** 2
     GENTLE_SLEEP_TIME = 5  # seconds
 
-    def __init__(self, client, index, *messages):
+    def __init__(self, client, indexes, *messages):
         self.client = client
+        self.es_indexes = indexes
         self.indexables = {}
-        self.es_index = index
         self.retries = 0
 
         # Sort messages by types
@@ -274,7 +284,7 @@ class ESIndexer:
 
             streamer = helpers.streaming_bulk(
                 self.client,
-                self.bulk_stream(model, flattener, self.es_index, gentle=gentle),
+                self.bulk_stream(model, flattener, gentle=gentle),
                 max_chunk_bytes=self.MAX_CHUNK_BYTES,
                 raise_on_error=False,
             )
@@ -294,17 +304,20 @@ class ESIndexer:
             # but we still have to ACK all the messages
             flattener.ack_pending()
 
-    def bulk_stream(self, model, flattener, index, gentle=False):
+    def bulk_stream(self, model, flattener, gentle=False):
         fetcher = fetcher_for(model)
-        opts = {'_index': index, '_type': model._meta.verbose_name_plural.replace(' ', '')}
+        _type = model._meta.verbose_name_plural.replace(' ', '')
 
         for chunk in util.chunked(flattener, size=self.CHUNK_SIZE):
             logger.debug('Indexing a chunk of size %d', len(chunk))
             for blob in fetcher(chunk):
-                if blob.pop('is_deleted', False):
-                    yield {'_id': blob['id'], '_op_type': 'delete', **opts}
-                else:
-                    yield {'_id': blob['id'], '_op_type': 'index', **blob, **opts}
+                is_deleted = blob.pop('is_deleted')
+                for index in self.es_indexes:
+                    if is_deleted:
+                        yield {'_id': blob['id'], '_op_type': 'delete', '_type': _type, '_index': index}
+                    else:
+                        yield {'_id': blob['id'], '_op_type': 'index', '_type': _type, '_index': index, **blob}
+
             if gentle:
                 logger.debug('Gentle mode enabled, sleeping for %d seconds', self.GENTLE_SLEEP_TIME)
                 time.sleep(self.GENTLE_SLEEP_TIME)

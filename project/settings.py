@@ -17,6 +17,11 @@ from django.utils.log import DEFAULT_LOGGING
 
 from celery.schedules import crontab
 
+
+def split(string, delim):
+    return tuple(filter(None, string.split(delim)))
+
+
 # Suppress select django deprecation messages
 LOGGING = DEFAULT_LOGGING
 
@@ -287,10 +292,23 @@ STATICFILES_FINDERS = (
     'django.contrib.staticfiles.finders.AppDirectoriesFinder',
 )
 
-ELASTICSEARCH_URL = os.environ.get('ELASTICSEARCH_URL', 'http://localhost:9200/')
-ELASTICSEARCH_INDEX = os.environ.get('ELASTIC_SEARCH_INDEX', 'share')
-ELASTICSEARCH_TIMEOUT = int(os.environ.get('ELASTICSEARCH_TIMEOUT', '45'))
-ELASTICSEARCH_INDEX_VERSIONS = tuple(v for v in os.environ.get('ELASTICSEARCH_INDEX_VERSIONS', '').split(',') if v)
+ELASTICSEARCH = {
+    'URL': os.environ.get('ELASTICSEARCH_URL', 'http://localhost:9200/'),
+    'INDEX': os.environ.get('ELASTIC_SEARCH_INDEX', 'share'),
+    'TIMEOUT': int(os.environ.get('ELASTICSEARCH_TIMEOUT', '45')),
+    'ACTIVE_INDEXES': split(os.environ.get('ELASTICSEARCH_ACTIVE_INDEXES', ''), ','),
+    'INDEX_VERSIONS': split(os.environ.get('ELASTICSEARCH_INDEX_VERSIONS', ''), ','),
+}
+
+ELASTICSEARCH['QUEUES'] = {
+    'elasticsearch-trickle': ELASTICSEARCH['ACTIVE_INDEXES'],
+    'elasticsearch-firehose': split(os.environ.get('ELASTICSEARCH_FIREHOSE_INDEXES', ''), ',')
+}
+
+ELASTICSEARCH_URL = ELASTICSEARCH['URL']
+ELASTICSEARCH_INDEX = ELASTICSEARCH['INDEX']
+ELASTICSEARCH_TIMEOUT = ELASTICSEARCH['TIMEOUT']
+ELASTICSEARCH_INDEX_VERSIONS = ELASTICSEARCH['INDEX_VERSIONS']
 
 INDEXABLE_MODELS = {
     'agent': 'Agent',
@@ -375,6 +393,9 @@ ELASTIC_QUEUE_SETTINGS = {
     'serializer': 'json',
     'compression': 'zlib',
     'no_ack': False,  # WHY KOMBU THAT'S NOT HOW ENGLISH WORKS
+}
+ELASTIC_QUEUES = {
+    DEFAULT_ELASTIC_QUEUE: ELASTICSEARCH_INDEX
 }
 
 # Logging

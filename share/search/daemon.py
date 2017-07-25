@@ -32,9 +32,9 @@ class SearchIndexerDaemon:
         self._running = threading.Event()
         self.connection_errors = ()
 
-        if threading.current_thread() == threading.main_thread():
-            logger.debug('Running in the main thread, SIGTERM is active')
-            signal.signal(signal.SIGTERM, self.stop)
+        # if threading.current_thread() == threading.main_thread():
+        #     logger.debug('Running in the main thread, SIGTERM is active')
+        #     signal.signal(signal.SIGTERM, self.stop)
 
     def run(self):
         try:
