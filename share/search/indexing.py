@@ -14,6 +14,19 @@ from share.search.fetchers import fetcher_for
 logger = logging.getLogger(__name__)
 
 
+class ElasticsearchGarbage:
+
+    def __init__(self, indexes, messages):
+        pass
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        for message in messages:
+            pass
+
+
 class FakeMessage:
 
     def __init__(self, model, ids):
@@ -340,3 +353,31 @@ class ESIndexer:
                 if gentle:
                     logger.debug('Gentle mode enabled, sleeping for %d seconds', self.GENTLE_SLEEP_TIME)
                     time.sleep(self.GENTLE_SLEEP_TIME)
+
+
+def interweave(*iterables):
+    iters = list(iterables)
+    while iters:
+        for i in tuple(iters):
+            try:
+                yield next(i)
+            except StopIteration:
+                iters.remove(i)
+
+
+class ElasticsearchActionGenerator:
+
+    def __init__(self, indexes, messages):
+        self.indexes = indexes
+        self.messages = sorted(messages, key=message.model)
+
+        self.acked = collections.deque()
+        self.pending = collections.deque()
+
+    def __iter__(self):
+        for model, messages in itertools.groupby(self.messages, lambda x: x.model():
+            fetchers = self.fetchers_for(model)
+            id_gen = itertools.tee(messages, n=len(fetchers)
+                for action in interweave():
+                    if not action:
+                        continue

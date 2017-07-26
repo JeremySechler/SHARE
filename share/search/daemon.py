@@ -3,6 +3,7 @@ import logging
 import signal
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from django.conf import settings
 
@@ -16,101 +17,156 @@ from share.search.indexing import ESIndexer
 logger = logging.getLogger(__name__)
 
 
-class SearchIndexerDaemon:
+class SearchIndexerDaemon(threading.Thread):
 
-    def __init__(self, celery_app, url=None, index=None, max_size=500, timeout=5, flush_interval=10):
-        self.app = celery_app
-        self.messages = []
-        self.last_flush = 0
+    @classmethod
+    def spawn(cls, *args, **kwargs):
+        inst = cls(*args, **kwargs)
+        runner = threading.Thread(target=inst.run)
+        runner.daemon = True
+        runner.start()
+        return inst
 
-        self.index = index or settings.ELASTICSEARCH_INDEX
-        self.client = Elasticsearch(url or settings.ELASTICSEARCH_URL, retry_on_timeout=True, timeout=settings.ELASTICSEARCH_TIMEOUT)
+    def __init__(self, celery_app, queue_name, indexes, url=None):
+        super(self).__init__(daemon=True)  # It's fine to kill this thread whenever if need be
 
-        self.flush_interval = flush_interval
-        self.max_size = max_size
-        self.timeout = timeout
-        self._running = threading.Event()
+        self._initialized = False
+        self.celery_app = celery_app
+
+        self.rabbit_connection = None
+        self.rabbit_queue = None
+        self.rabbit_queue_name = queue_name
+
+        self.es_client = None
+        self.es_indexes = indexes
+        self.es_url = url or settings.ELASTICSEARCH_URL
+
         self.connection_errors = ()
+        self.keep_running = threading.Event()
 
-        # if threading.current_thread() == threading.main_thread():
-        #     logger.debug('Running in the main thread, SIGTERM is active')
-        #     signal.signal(signal.SIGTERM, self.stop)
+    def initialize(self):
+        logger.info('Initializing %r', self)
 
-    def run(self):
+        logger.debug('Connecting to Elasticsearch cluster at "%s"', self.es_url)
         try:
-            connection = self.app.pool.acquire(block=True)
-            queue = connection.SimpleQueue(settings.ELASTIC_QUEUE, **settings.ELASTIC_QUEUE_SETTINGS)
-        except Exception as e:
-            logger.exception('Could not connect to broker')
-            raise
-
-        logger.info('Connected to broker')
-        logger.info('Using queue "%s"', settings.ELASTIC_QUEUE)
-
-        self.connection_errors = connection.connection_errors
-        logger.debug('connection_errors set to %r', self.connection_errors)
-
-        # Set an upper bound to avoid fetching everything in the queue
-        logger.info('Setting prefetch_count to %d', self.max_size * 1.1)
-        queue.consumer.qos(prefetch_count=int(self.max_size * 1.1), apply_global=True)
-
-        try:
-            self._run(queue)
-        except KeyboardInterrupt:
-            logger.warning('Recieved Interrupt. Exiting...')
-            return
+            self.es_client = Elasticsearch(
+                self.es_url,
+                retry_on_timeout=True,
+                timeout=settings.ELASTICSEARCH_TIMEOUT,
+                # sniff before doing anything
+                sniff_on_start=True,
+                # refresh nodes after a node fails to respond
+                sniff_on_connection_fail=True,
+                # and also every 60 seconds
+                sniffer_timeout=60
+            )
         except Exception as e:
             client.captureException()
-            logger.exception('Encountered an unexpected error. Attempting to flush before exiting.')
+            raise RuntimeError('Unable to connect to Elasticsearch cluster at "{}"'.format(self.es_url)) from e
 
-            if self.messages:
-                try:
-                    self.flush()
-                except Exception:
-                    client.captureException()
-                    logger.exception('%d messages could not be flushed', len(self.messages))
+        logger.debug('Creating queue "%s" in RabbitMQ', self.rabbit_queue_name)
+        try:
+            self.rabbit_connection = self.celery_app.pool.acquire(block=True)
+            self.rabbit_queue = self.rabbit_connection.SimpleQueue(self.rabbit_queue_name, **settings.ELASTIC_QUEUE_SETTINGS)
+        except Exception as e:
+            client.captureException()
+            raise RuntimeError('Unable to create queue "{}"'.format(self.rabbit_queue_name)) from e
 
-            raise e
-        finally:
-            try:
-                queue.close()
-                connection.close()
-            except Exception as e:
-                logger.exception('Failed to clean up broker connection')
+        self.connection_errors = self.rabbit_connection.connection_errors
+        logger.debug('connection_errors set to %r', self.connection_errors)
+
+        # TODO
+        # Set an upper bound to avoid fetching everything in the queue
+        logger.info('Setting prefetch_count to %d', self.max_size * 1.1)
+        self.rabbit_queue.consumer.qos(prefetch_count=int(self.max_size * 1.1), apply_global=True)
+
+        logger.debug('%r successfully initiialized', self)
+        self._initialized = True
+
+    def start(self):
+        self.initialize()
+        return super(self).start()
 
     def stop(self):
-        logger.info('Stopping indexer...')
+        logger.info('Stopping %r', self)
         self._running.clear()
+        return self.join()
 
-    def flush(self):
-        logger.info('Flushing %d messages', len(self.messages))
+    def run(self):
+        futures = []
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            while self._running.is_set():
+                messages = self._read_messages(max_size=500, timeout=10)
+                if not messages:
+                    continue
+                futures.append(pool.submit(self._index, messages))
+                # TODO Check errors/resolve futures
 
-        ESIndexer(self.client, self.index, *self.messages).index(critical=self.connection_errors)
+    def _index(self, messages):
+        try:
+            pass
+            # construct stream
+            # pipe to bulk index helper
+        except self.connection_errors as e:
+            pass
+        except Exception as e:
+            pass
 
-        self.messages.clear()
-        self.last_flush = time.time()
 
-        logger.debug('Successfully flushed messages')
+        # try:
+        #     self._run(queue)
+        # except KeyboardInterrupt:
+        #     logger.warning('Recieved Interrupt. Exiting...')
+        #     return
+        # except Exception as e:
+        #     client.captureException()
+        #     logger.exception('Encountered an unexpected error')
 
-    def _run(self, queue):
-        self._running.set()
-        self.last_flush = time.time()
+        #     if self.messages:
+        #         try:
+        #             self.flush()
+        #         except Exception:
+        #             client.captureException()
+        #             logger.exception('%d messages could not be flushed', len(self.messages))
 
-        while self._running.is_set():
-            try:
-                message = queue.get(timeout=self.timeout)
-                self.messages.append(message)
-            except Empty:
-                pass
+        #     raise e
+        # finally:
+        #     try:
+        #         queue.close()
+        #         connection.close()
+        #     except Exception as e:
+        #         logger.exception('Failed to clean up broker connection')
 
-            if not self.messages:
-                continue
 
-            if time.time() - self.last_flush >= self.flush_interval:
-                logger.debug('Time since last flush (%.2f sec) has exceeded flush_interval (%.2f sec) . Flushing...', time.time() - self.last_flush, self.flush_interval)
-                self.flush()
-            elif len(self.messages) >= self.max_size:
-                logger.debug('Buffer has exceeded max_size. Flushing...')
-                self.flush()
+    # def flush(self):
+    #     logger.info('Flushing %d messages', len(self.messages))
 
-        logger.info('Exiting...')
+    #     ESIndexer(self.client, self.index, *self.messages).index(critical=self.connection_errors)
+
+    #     self.messages.clear()
+    #     self.last_flush = time.time()
+
+    #     logger.debug('Successfully flushed messages')
+
+    # def _run(self, queue):
+    #     self._running.set()
+    #     self.last_flush = time.time()
+
+    #     while self._running.is_set():
+    #         try:
+    #             message = queue.get(timeout=self.timeout)
+    #             self.messages.append(message)
+    #         except Empty:
+    #             pass
+
+    #         if not self.messages:
+    #             continue
+
+    #         if time.time() - self.last_flush >= self.flush_interval:
+    #             logger.debug('Time since last flush (%.2f sec) has exceeded flush_interval (%.2f sec) . Flushing...', time.time() - self.last_flush, self.flush_interval)
+    #             self.flush()
+    #         elif len(self.messages) >= self.max_size:
+    #             logger.debug('Buffer has exceeded max_size. Flushing...')
+    #             self.flush()
+
+    #     logger.info('Exiting...')

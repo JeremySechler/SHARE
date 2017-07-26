@@ -307,23 +307,23 @@ ELASTICSEARCH = {
 }
 
 # TODO json blob from env
-ELASTICSEARCH['QUEUES'] = {
-    'elasticsearch-trickle': [
-        {
-            'indexes': ELASTICSEARCH['ACTIVE_INDEXES'],
-            'fetcher_overrides': {},
-        },
-        {
-            'indexes': 
-            'fetcher_overrides': {
-                'creativework': 'short_subjects'
-            }
-        },
-    ],
-    'elasticsearch-firehose': {
-        'indexes': split(os.environ.get('ELASTICSEARCH_FIREHOSE_INDEXES', ''), ','),
-    },
-}
+# ELASTICSEARCH['QUEUES'] = {
+#     'elasticsearch-trickle': [
+#         {
+#             'indexes': ELASTICSEARCH['ACTIVE_INDEXES'],
+#             'fetcher_overrides': {},
+#         },
+#         {
+#             'indexes': 
+#             'fetcher_overrides': {
+#                 'creativework': 'short_subjects'
+#             }
+#         },
+#     ],
+#     'elasticsearch-firehose': {
+#         'indexes': split(os.environ.get('ELASTICSEARCH_FIREHOSE_INDEXES', ''), ','),
+#     },
+# }
 
 ELASTICSEARCH_URL = ELASTICSEARCH['URL']
 ELASTICSEARCH_INDEX = ELASTICSEARCH['INDEX']
@@ -414,9 +414,9 @@ ELASTIC_QUEUE_SETTINGS = {
     'compression': 'zlib',
     'no_ack': False,  # WHY KOMBU THAT'S NOT HOW ENGLISH WORKS
 }
-ELASTIC_QUEUES = {
-    DEFAULT_ELASTIC_QUEUE: ELASTICSEARCH_INDEX
-}
+# ELASTIC_QUEUES = {
+#     DEFAULT_ELASTIC_QUEUE: ELASTICSEARCH_INDEX
+# }
 
 # Logging
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'WARNING').upper()
@@ -453,7 +453,7 @@ LOGGING = {
             'level': LOG_LEVEL,
             'propagate': False
         },
-        'providers': {
+        'elasticsearch': {
             'handlers': ['console'],
             'level': LOG_LEVEL,
             'propagate': False

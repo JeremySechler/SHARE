@@ -109,6 +109,7 @@ def daemon(args, argv):
         -i, --interval=SIZE       The interval at which to flush the queue in seconds [default: 10]
         -l, --log-level=LOGLEVEL  Set the log level [default: INFO]
     """
+    logging.getLogger('elasticsearch').setLevel(args['--log-level'])
     logging.getLogger('share.search.daemon').setLevel(args['--log-level'])
     logging.getLogger('share.search.indexing').setLevel(args['--log-level'])
 
